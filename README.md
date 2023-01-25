@@ -6,7 +6,7 @@ RefineHead is a highly explainable and flexible FCN-based head network using pre
 
 RefineHead is a FCN-based head network for bbox refinement.
 
-<img src="configs\RefineHead\RefineHead_structure">
+<img src="https://github.com/unbelieboomboom/RefineHead\configs\RefineHead\RefineHead_structure">
 
 - **Flexible Architecture**
 
