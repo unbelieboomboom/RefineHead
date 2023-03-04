@@ -72,4 +72,9 @@ python tools/train.py \
 
 ## Pretrained model
 
-Uploading.
+ Models pretrained on Cityscapes are already available [here](https://pan.baidu.com/s/1dpr62o15ShxUTT96yKdN1A?pwd=atud)
+(extract code：atud)
+
+## Model Zoo
+
+Waiting for updates.
