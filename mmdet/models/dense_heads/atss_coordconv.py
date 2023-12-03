@@ -8,10 +8,11 @@ from mmdet.core import (anchor_inside_flags, build_assigner, build_sampler,
                         images_to_levels, multi_apply, reduce_mean, unmap)
 from ..builder import HEADS, build_loss
 from .anchor_head import AnchorHead
+from mmdet.core.utils import center_of_mass, generate_coordinate
 
 
 @HEADS.register_module()
-class ATSSHead_RH(AnchorHead):
+class ATSSHead_coord(AnchorHead):
     """Bridging the Gap Between Anchor-based and Anchor-free Detection via
     Adaptive Training Sample Selection.
 
@@ -33,7 +34,6 @@ class ATSSHead_RH(AnchorHead):
                      type='CrossEntropyLoss',
                      use_sigmoid=True,
                      loss_weight=1.0),
-                 loss_bbox_rh=dict(type='GIoULoss', loss_weight=0.1),
                  init_cfg=dict(
                      type='Normal',
                      layer='Conv2d',
@@ -48,7 +48,7 @@ class ATSSHead_RH(AnchorHead):
         self.stacked_convs = stacked_convs
         self.conv_cfg = conv_cfg
         self.norm_cfg = norm_cfg
-        super(ATSSHead_RH, self).__init__(
+        super(ATSSHead_coord, self).__init__(
             num_classes,
             in_channels,
             reg_decoded_bbox=reg_decoded_bbox,
@@ -62,14 +62,12 @@ class ATSSHead_RH(AnchorHead):
             sampler_cfg = dict(type='PseudoSampler')
             self.sampler = build_sampler(sampler_cfg, context=self)
         self.loss_centerness = build_loss(loss_centerness)
-        self.loss_bbox_rh = build_loss(loss_bbox_rh)
 
     def _init_layers(self):
         """Initialize layers of the head."""
         self.relu = nn.ReLU(inplace=True)
         self.cls_convs = nn.ModuleList()
         self.reg_convs = nn.ModuleList()
-        self.refined_convs = nn.ModuleList()
         for i in range(self.stacked_convs):
             chn = self.in_channels if i == 0 else self.feat_channels
             self.cls_convs.append(
@@ -81,8 +79,7 @@ class ATSSHead_RH(AnchorHead):
                     padding=1,
                     conv_cfg=self.conv_cfg,
                     norm_cfg=self.norm_cfg))
-        for i in range(3):
-            chn = self.in_channels if i == 0 else self.feat_channels
+            chn = self.in_channels + 2 if i == 0 else self.feat_channels
             self.reg_convs.append(
                 ConvModule(
                     chn,
@@ -92,17 +89,6 @@ class ATSSHead_RH(AnchorHead):
                     padding=1,
                     conv_cfg=self.conv_cfg,
                     norm_cfg=self.norm_cfg))
-            chn = self.in_channels+4 if i == 0 else self.feat_channels
-            self.refined_convs.append(
-                ConvModule(
-                    chn,
-                    self.feat_channels,
-                    3,
-                    stride=1,
-                    padding=1,
-                    conv_cfg=self.conv_cfg,
-                    norm_cfg=self.norm_cfg))
-        # self.rh_norm = nn.InstanceNorm2d(4)
         pred_pad_size = self.pred_kernel_size // 2
         self.atss_cls = nn.Conv2d(
             self.feat_channels,
@@ -119,12 +105,6 @@ class ATSSHead_RH(AnchorHead):
             self.num_base_priors * 1,
             self.pred_kernel_size,
             padding=pred_pad_size)
-        self.refined_head = nn.Conv2d(
-            self.feat_channels,
-            self.num_base_priors * 4,
-            self.pred_kernel_size,
-            padding=pred_pad_size)
-        # torch.nn.init.normal_(self.refined_head.weight, mean=0.133, std=0.01)
         self.scales = nn.ModuleList(
             [Scale(1.0) for _ in self.prior_generator.strides])
 
@@ -167,26 +147,18 @@ class ATSSHead_RH(AnchorHead):
         reg_feat = x
         for cls_conv in self.cls_convs:
             cls_feat = cls_conv(cls_feat)
+        coord_feat = generate_coordinate(reg_feat.size(),
+                                         reg_feat.device)
+        reg_feat = torch.cat([reg_feat, coord_feat], 1)
         for reg_conv in self.reg_convs:
             reg_feat = reg_conv(reg_feat)
         cls_score = self.atss_cls(cls_feat)
         # we just follow atss, not apply exp in bbox_pred
+        bbox_pred = scale(self.atss_reg(reg_feat)).float()
         centerness = self.atss_centerness(reg_feat)
-        bbox_pred_mid = self.atss_reg(reg_feat)
-        bbox_pred = scale(bbox_pred_mid).float()
-        bbox_pred_detach = bbox_pred.clone().detach()
-        bbox_pred_detach = bbox_pred_detach / 512
-        # bbox_pred_detach = self.rh_norm(bbox_pred_detach)
-        rh_refined = torch.cat([reg_feat, bbox_pred_detach], dim=1)
-        for refined_conv in self.refined_convs:
-            rh_refined = refined_conv(rh_refined)
-        bbox_pred_RH = scale(self.refined_head(rh_refined)).float()
-        if self.atss_cls.training:
-            return cls_score, bbox_pred, bbox_pred_RH, centerness
-        else:
-            return cls_score, bbox_pred_RH, centerness
+        return cls_score, bbox_pred, centerness
 
-    def loss_single(self, anchors, cls_score, bbox_pred, bbox_pred_RH, centerness, labels,
+    def loss_single(self, anchors, cls_score, bbox_pred, centerness, labels,
                     label_weights, bbox_targets, num_total_samples):
         """Compute loss of a single scale level.
 
@@ -195,7 +167,6 @@ class ATSSHead_RH(AnchorHead):
                 Has shape (N, num_anchors * num_classes, H, W).
             bbox_pred (Tensor): Box energies / deltas for each scale
                 level with shape (N, num_anchors * 4, H, W).
-            bbox_pred_RH (Tensor): The same as bbox_pred.
             anchors (Tensor): Box reference for each scale level with shape
                 (N, num_total_anchors, 4).
             labels (Tensor): Labels of each anchors with shape
@@ -215,7 +186,6 @@ class ATSSHead_RH(AnchorHead):
         cls_score = cls_score.permute(0, 2, 3, 1).reshape(
             -1, self.cls_out_channels).contiguous()
         bbox_pred = bbox_pred.permute(0, 2, 3, 1).reshape(-1, 4)
-        bbox_pred_RH = bbox_pred_RH.permute(0, 2, 3, 1).reshape(-1, 4)
         centerness = centerness.permute(0, 2, 3, 1).reshape(-1)
         bbox_targets = bbox_targets.reshape(-1, 4)
         labels = labels.reshape(-1)
@@ -233,7 +203,6 @@ class ATSSHead_RH(AnchorHead):
         if len(pos_inds) > 0:
             pos_bbox_targets = bbox_targets[pos_inds]
             pos_bbox_pred = bbox_pred[pos_inds]
-            pos_bbox_pred_RH = bbox_pred_RH[pos_inds]
             pos_anchors = anchors[pos_inds]
             pos_centerness = centerness[pos_inds]
 
@@ -241,18 +210,10 @@ class ATSSHead_RH(AnchorHead):
                 pos_anchors, pos_bbox_targets)
             pos_decode_bbox_pred = self.bbox_coder.decode(
                 pos_anchors, pos_bbox_pred)
-            pos_decode_bbox_pred_RH = self.bbox_coder.decode(
-                pos_anchors, pos_bbox_pred_RH)
 
             # regression loss
             loss_bbox = self.loss_bbox(
                 pos_decode_bbox_pred,
-                pos_bbox_targets,
-                weight=centerness_targets,
-                avg_factor=1.0)
-
-            loss_bbox_RH = self.loss_bbox_rh(
-                pos_decode_bbox_pred_RH,
                 pos_bbox_targets,
                 weight=centerness_targets,
                 avg_factor=1.0)
@@ -265,17 +226,15 @@ class ATSSHead_RH(AnchorHead):
 
         else:
             loss_bbox = bbox_pred.sum() * 0
-            loss_bbox_RH = bbox_pred_RH.sum() * 0
             loss_centerness = centerness.sum() * 0
             centerness_targets = bbox_targets.new_tensor(0.)
 
-        return loss_cls, loss_bbox, loss_bbox_RH, loss_centerness, centerness_targets.sum()
+        return loss_cls, loss_bbox, loss_centerness, centerness_targets.sum()
 
-    @force_fp32(apply_to=('cls_scores', 'bbox_preds', 'bbox_pred_RH', 'centernesses'))
+    @force_fp32(apply_to=('cls_scores', 'bbox_preds', 'centernesses'))
     def loss(self,
              cls_scores,
              bbox_preds,
-             bbox_pred_RH,
              centernesses,
              gt_bboxes,
              gt_labels,
@@ -328,13 +287,12 @@ class ATSSHead_RH(AnchorHead):
                          device=device)).item()
         num_total_samples = max(num_total_samples, 1.0)
 
-        losses_cls, losses_bbox, loss_bbox_RH, loss_centerness,\
+        losses_cls, losses_bbox, loss_centerness,\
             bbox_avg_factor = multi_apply(
                 self.loss_single,
                 anchor_list,
                 cls_scores,
                 bbox_preds,
-                bbox_pred_RH,
                 centernesses,
                 labels_list,
                 label_weights_list,
@@ -344,11 +302,9 @@ class ATSSHead_RH(AnchorHead):
         bbox_avg_factor = sum(bbox_avg_factor)
         bbox_avg_factor = reduce_mean(bbox_avg_factor).clamp_(min=1).item()
         losses_bbox = list(map(lambda x: x / bbox_avg_factor, losses_bbox))
-        loss_bbox_RH = list(map(lambda x: x / bbox_avg_factor, loss_bbox_RH))
         return dict(
             loss_cls=losses_cls,
             loss_bbox=losses_bbox,
-            loss_bbox_RH=loss_bbox_RH,
             loss_centerness=loss_centerness)
 
     def centerness_target(self, anchors, gts):

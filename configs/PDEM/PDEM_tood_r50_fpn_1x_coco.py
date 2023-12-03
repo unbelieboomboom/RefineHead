@@ -1,12 +1,13 @@
 _base_ = [
-    '../atssrh/cityscapes_local_detection_1280.py',
+    '../PDEM/coco_detection.py',
     '../_base_/schedules/schedule_1x.py', '../_base_/default_runtime.py'
 ]
 custom_imports = dict(
-    imports=['mmdet.models.dense_heads.atss_RH_head'],
+    imports=['mmdet.models.dense_heads.tood_PDEM_head'],
     allow_failed_imports=False)
+
 model = dict(
-    type='ATSS',
+    type='TOOD',
     backbone=dict(
         type='ResNet',
         depth=50,
@@ -16,7 +17,7 @@ model = dict(
         norm_cfg=dict(type='BN', requires_grad=True),
         norm_eval=True,
         style='pytorch',
-        init_cfg=dict(type='Pretrained', checkpoint='pretrain/resnet50-0676ba61.pth')),
+        init_cfg=dict(type='Pretrained', checkpoint='torchvision://resnet50')),
     neck=dict(
         type='FPN',
         in_channels=[256, 512, 1024, 2048],
@@ -25,11 +26,14 @@ model = dict(
         add_extra_convs='on_output',
         num_outs=5),
     bbox_head=dict(
-        type='ATSSHead_RH',
-        num_classes=8,
+        type='TOOD_rH_Head',
+        num_classes=80,
         in_channels=256,
-        stacked_convs=4,
+        stacked_convs=6,
         feat_channels=256,
+        RH_coeff=800,
+        rh_stacked_convs=6,
+        anchor_type='anchor_free',
         anchor_generator=dict(
             type='AnchorGenerator',
             ratios=[1.0],
@@ -40,19 +44,29 @@ model = dict(
             type='DeltaXYWHBBoxCoder',
             target_means=[.0, .0, .0, .0],
             target_stds=[0.1, 0.1, 0.2, 0.2]),
-        loss_cls=dict(
+        initial_loss_cls=dict(
             type='FocalLoss',
             use_sigmoid=True,
+            activated=True,  # use probability instead of logit as input
             gamma=2.0,
             alpha=0.25,
             loss_weight=1.0),
+        loss_cls=dict(
+            type='QualityFocalLoss',
+            use_sigmoid=True,
+            activated=True,  # use probability instead of logit as input
+            beta=2.0,
+            loss_weight=1.0),
+        # loss_bbox=dict(type='GIoULoss', loss_weight=2.0),
         loss_bbox=dict(type='GIoULoss', loss_weight=0.2),
-        loss_bbox_rh=dict(type='GIoULoss', loss_weight=2.0),
-        loss_centerness=dict(
-            type='CrossEntropyLoss', use_sigmoid=True, loss_weight=1.0)),
-    # training and testing settings
+        loss_bbox_rh=dict(type='GIoULoss', loss_weight=2.0)
+    ),
     train_cfg=dict(
-        assigner=dict(type='ATSSAssigner', topk=9),
+        initial_epoch=4,
+        initial_assigner=dict(type='ATSSAssigner', topk=9),
+        assigner=dict(type='TaskAlignedAssigner', topk=13),
+        alpha=1,
+        beta=6,
         allowed_border=-1,
         pos_weight=-1,
         debug=False),
@@ -62,13 +76,19 @@ model = dict(
         score_thr=0.05,
         nms=dict(type='nms', iou_threshold=0.6),
         max_per_img=100))
+# # optimizer
+# optimizer = dict(type='SGD', lr=0.01, momentum=0.9, weight_decay=0.0001)
+
+# custom hooks
+custom_hooks = [dict(type='SetEpochInfoHook')]
+
 # optimizer
-optimizer = dict(type='SGD', lr=0.0005, momentum=0.9, weight_decay=0.0001)
+optimizer = dict(type='SGD', lr=0.01, momentum=0.9, weight_decay=0.0001)
 lr_config = dict(
     policy='step',
     warmup='linear',
     warmup_iters=500,
     warmup_ratio=0.001,
-    step=[16, 22])
-runner = dict(type='EpochBasedRunner', max_epochs=24)
-# auto_scale_lr = dict(enable=True, base_batch_size=2)
+    step=[8, 11])
+runner = dict(type='EpochBasedRunner', max_epochs=12)
+auto_scale_lr = dict(enable=True, base_batch_size=8)
