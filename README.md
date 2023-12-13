@@ -23,7 +23,7 @@ IoU can only quantify the proportion of the overlap area between the prediction 
 failing to describe the gap between the non-overlapping part and the ground-truth. Even with identical IoU scores, 
 the detected Bboxes may have significant gaps in identifying and locating instances
 
-<img src="https://github.com/unbelieboomboom/RefineHead/images/deviation.png">
+<img src="https://github.com/unbelieboomboom/RefineHead/blob/main/images/deviation.png">
 
 ## Obtaining BLDQ scores
 
@@ -48,7 +48,7 @@ python BLDQmetrics/BLDQ_Cityscapes.py
 
 ## Architecture of PDEM
 
-<img src="https://github.com/unbelieboomboom/RefineHead/images/PDEM.png">
+<img src="https://github.com/unbelieboomboom/RefineHead/blob/main/images/PDEM.png">
 
 
 ## Starting with PDEM
